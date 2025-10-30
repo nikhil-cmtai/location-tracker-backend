@@ -1,0 +1,266 @@
+import { Schema, model } from 'mongoose';
+
+// Helper for IST conversion
+function utcToIST(date) {
+  if (!date) return null;
+  const d = new Date(date);
+  d.setMinutes(d.getMinutes() + 330); // 5 hours 30 minutes
+  return d;
+}
+
+const trackingPacketSchema = new Schema({
+  // Top-level fields
+  protocol: {
+    type: String,
+    default: 'BHARAT_101'
+  },
+  packet_type: {
+    type: String,
+    default: 'tracking'
+  },
+  timestamp: {
+    type: Date,
+    default: Date.now
+  },
+  raw_data: String,
+
+  // All parsed fields at the same level (flat structure)
+  header: String,
+  vendor_id: String,
+  firmware_version: String,
+  message_type: String,
+  message_id: Number,
+  message_description: String,
+  packet_status: String,
+
+  // Device info
+  imei: {
+    type: String,
+    index: true
+  },
+  vehicle_reg_no: {
+    type: String,
+    index: true
+  },
+
+  // GPS info
+  fix_status: Boolean,
+  date: String,
+  time: String,
+  formatted_datetime: String,
+  latitude: {
+    type: Number,
+    default: 0
+  },
+  latitude_dir: {
+    type: String,
+    default: 'N'
+  },
+  longitude: {
+    type: Number,
+    default: 0
+  },
+  longitude_dir: {
+    type: String,
+    default: 'E'
+  },
+  speed_kmh: {
+    type: Number,
+    default: 0
+  },
+  heading: {
+    type: Number,
+    default: 0
+  },
+  satellites: {
+    type: Number,
+    default: 0
+  },
+  altitude_m: {
+    type: Number,
+    default: 0
+  },
+  pdop: {
+    type: Number,
+    default: 0
+  },
+  hdop: {
+    type: Number,
+    default: 0
+  },
+
+  // Vehicle status
+  operator_name: String,
+  ignition: Boolean,
+  main_power: Boolean,
+  main_voltage: {
+    type: Number,
+    default: 0
+  },
+  battery_voltage: {
+    type: Number,
+    default: 0
+  },
+  emergency_status: Boolean,
+  tamper_alert: String,
+
+  // Network info
+  gsm_signal: {
+    type: Number,
+    default: 0
+  },
+  mcc: Number,
+  mnc: Number,
+  lac: String,
+  cell_id: String,
+
+  // Neighbor cells (flat)
+  neighbor_cell_1_signal: {
+    type: Number,
+    default: 0
+  },
+  neighbor_cell_1_lac: String,
+  neighbor_cell_1_cell_id: String,
+  neighbor_cell_2_signal: {
+    type: Number,
+    default: 0
+  },
+  neighbor_cell_2_lac: String,
+  neighbor_cell_2_cell_id: String,
+  neighbor_cell_3_signal: {
+    type: Number,
+    default: 0
+  },
+  neighbor_cell_3_lac: String,
+  neighbor_cell_3_cell_id: String,
+  neighbor_cell_4_signal: {
+    type: Number,
+    default: 0
+  },
+  neighbor_cell_4_lac: String,
+  neighbor_cell_4_cell_id: String,
+
+  // IO status
+  digital_inputs: {
+    type: String,
+    default: '0000'
+  },
+  digital_outputs: {
+    type: String,
+    default: '00'
+  },
+  frame_number: {
+    type: String,
+    default: '0'
+  },
+  analog_input_1: {
+    type: Number,
+    default: 0
+  },
+  analog_input_2: {
+    type: Number,
+    default: 0
+  },
+
+  // Additional info
+  delta_distance: {
+    type: String,
+    default: '0'
+  },
+  ota_response: String,
+  checksum: String,
+
+  // Location for geospatial queries
+  location: {
+    type: {
+      type: String,
+      enum: ['Point'],
+    },
+    coordinates: {
+      type: [Number]
+    } // [longitude, latitude]
+  },
+  expiresAt: {
+    type: Date,
+    default: () => new Date(Date.now() + 30*24*60*60*1000), // now + 30 days
+    index: { expires: 0 } // TTL index, expire exactly when expiresAt is reached
+  }
+}, {
+  timestamps: true // enables createdAt and updatedAt (stored in UTC)
+});
+
+// Persist IST timestamps as separate fields to avoid colliding with virtuals
+trackingPacketSchema.add({
+  createdAtISTStored: { type: Date },
+  updatedAtISTStored: { type: Date }
+});
+
+// Automatically create/update location field if coordinates present
+trackingPacketSchema.pre('save', function(next) {
+  try {
+    const latVal = this.latitude;
+    const lngVal = this.longitude;
+    if (Number.isFinite(Number(latVal)) && Number.isFinite(Number(lngVal)) && (latVal !== 0 || lngVal !== 0)) {
+      let lat = Number(latVal);
+      let lng = Number(lngVal);
+      if (this.latitude_dir === 'S') lat = -Math.abs(lat);
+      if (this.longitude_dir === 'W') lng = -Math.abs(lng);
+      this.location = {
+        type: 'Point',
+        coordinates: [lng, lat]
+      };
+    } else {
+      if (this.location) delete this.location;
+    }
+  } catch (err) {
+    console.error('Error in pre-save middleware:', err);
+  }
+  next();
+});
+
+trackingPacketSchema.index({ location: '2dsphere' });
+
+// Virtuals for IST time
+trackingPacketSchema.virtual('createdAtIST').get(function() {
+  return utcToIST(this.createdAt);
+});
+trackingPacketSchema.virtual('updatedAtIST').get(function() {
+  return utcToIST(this.updatedAt);
+});
+
+// Populate persisted IST fields before save (timestamps are already set by mongoose)
+trackingPacketSchema.pre('save', function(next) {
+  try {
+    if (this.createdAt) this.createdAtISTStored = utcToIST(this.createdAt);
+    if (this.updatedAt) this.updatedAtISTStored = utcToIST(this.updatedAt);
+  } catch (err) {
+    console.error('Error populating IST timestamps in pre-save:', err);
+  }
+  next();
+});
+
+// When using findOneAndUpdate, ensure updatedAtIST is set on the update document
+trackingPacketSchema.pre('findOneAndUpdate', function(next) {
+  try {
+    const update = this.getUpdate() || {};
+    const nowIST = utcToIST(new Date());
+    if (!update.$set) update.$set = {};
+    update.$set.updatedAtISTStored = nowIST;
+    // If upsert and no createdAtISTStored, set it too
+    if (this.getOptions && this.getOptions().upsert) {
+      if (!update.$setOnInsert) update.$setOnInsert = {};
+      update.$setOnInsert.createdAtISTStored = nowIST;
+    }
+    this.setUpdate(update);
+  } catch (err) {
+    console.error('Error setting IST timestamp in findOneAndUpdate:', err);
+  }
+  next();
+});
+
+// Make sure virtuals are included in outputs
+trackingPacketSchema.set('toJSON', { virtuals: true });
+trackingPacketSchema.set('toObject', { virtuals: true });
+
+const TrackingPacket = model('TrackingPacket', trackingPacketSchema);
+export default TrackingPacket;
